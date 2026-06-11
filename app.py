@@ -197,6 +197,145 @@ def export_csv():
     )
 
 
+# ------------------------------------------- SMS campaign compliance pages
+
+_LEGAL_PAGE_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} — Readathon Reading Log</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem auto; max-width: 44rem; padding: 0 1rem; color: #222; line-height: 1.6; }
+  h1 { font-size: 1.5rem; }
+  h2 { font-size: 1.15rem; margin-top: 1.5rem; }
+  footer { margin-top: 2rem; font-size: 0.9rem; color: #666; }
+</style>
+</head>
+<body>
+<h1>{{ title }}</h1>
+<p><em>Effective date: {{ effective_date }}</em></p>
+{{ body|safe }}
+<footer>Readathon Reading Log · <a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms &amp; Conditions</a></footer>
+</body>
+</html>"""
+
+_EFFECTIVE_DATE = "June 11, 2026"
+_CONTACT_EMAIL = "adamcooper1386@gmail.com"
+
+_PRIVACY_BODY = f"""
+<p>Readathon Reading Log ("the Service") is a private, family-run SMS service
+that lets a small group of invited family members and caregivers log a
+child's reading sessions by text message.</p>
+
+<h2>Information we collect</h2>
+<p>We collect only what is needed to operate the Service: the mobile phone
+numbers of invited participants, the content of the text messages they send
+(descriptions of reading sessions), and the date and time each message was
+received.</p>
+
+<h2>How we use it</h2>
+<p>Messages are used solely to record reading sessions and to send each
+sender an automated confirmation reply with a running reading total. The
+data is reviewed only by the family that operates the Service.</p>
+
+<h2>No sharing of mobile information</h2>
+<p>We do not sell, rent, or share personal information &mdash; including
+mobile phone numbers &mdash; with third parties or affiliates for marketing
+or promotional purposes. Text messaging originator opt-in data and consent
+are not shared with any third party. Message content is processed by our
+service providers (Twilio for SMS delivery and Anthropic for automated
+message interpretation) only as necessary to operate the Service.</p>
+
+<h2>Message frequency and rates</h2>
+<p>Message frequency varies based on how often you choose to text the
+Service; you will receive one automated reply per message you send.
+<strong>Message and data rates may apply.</strong></p>
+
+<h2>Opting out</h2>
+<p>Text <strong>STOP</strong> at any time to stop receiving messages. Text
+<strong>HELP</strong> for help. You may also contact us at
+<a href="mailto:{_CONTACT_EMAIL}">{_CONTACT_EMAIL}</a>.</p>
+
+<h2>Data retention and security</h2>
+<p>Reading-session records are kept for the duration of the reading program
+and are stored on access-controlled servers. You may request deletion of
+your information at any time using the contact address above.</p>
+
+<h2>Children's privacy</h2>
+<p>The Service is used by adults to log a child's reading. The child does
+not use the Service directly, and no information is collected from the
+child.</p>
+
+<h2>Contact</h2>
+<p>Questions about this policy: <a href="mailto:{_CONTACT_EMAIL}">{_CONTACT_EMAIL}</a>.</p>
+"""
+
+_TERMS_BODY = f"""
+<p>These terms govern the Readathon Reading Log SMS program ("the
+Program").</p>
+
+<h2>Program description</h2>
+<p>The Program is a private, invitation-only SMS service that lets family
+members and caregivers log a child's reading sessions by texting a dedicated
+phone number. Each message receives one automated confirmation reply
+summarizing what was logged and the running reading total.</p>
+
+<h2>Opt-in</h2>
+<p>Participation is limited to family members and caregivers who have asked
+to take part. By sending a text message to the Program's phone number, you
+consent to receive automated reply messages at that number.</p>
+
+<h2>Message frequency</h2>
+<p>Message frequency varies based on your use: you receive one automated
+reply for each message you send. No promotional or recurring scheduled
+messages are sent.</p>
+
+<h2>Cost</h2>
+<p><strong>Message and data rates may apply</strong> according to your
+mobile carrier's plan. The Program itself is free to use.</p>
+
+<h2>Opting out and help</h2>
+<p>Text <strong>STOP</strong> to cancel at any time; after that you will
+receive no further messages (a single confirmation of your opt-out may be
+sent). Text <strong>START</strong> to rejoin. Text <strong>HELP</strong> or
+email <a href="mailto:{_CONTACT_EMAIL}">{_CONTACT_EMAIL}</a> for help.</p>
+
+<h2>Carriers</h2>
+<p>Mobile carriers are not liable for delayed or undelivered messages.</p>
+
+<h2>Privacy</h2>
+<p>See our <a href="/privacy">Privacy Policy</a> for how we handle your
+information, including our commitment not to share mobile numbers with
+third parties for marketing purposes.</p>
+
+<h2>Changes and contact</h2>
+<p>We may update these terms from time to time; the current version is
+always available at this page. Questions:
+<a href="mailto:{_CONTACT_EMAIL}">{_CONTACT_EMAIL}</a>.</p>
+"""
+
+
+@app.get("/privacy")
+def privacy():
+    return render_template_string(
+        _LEGAL_PAGE_TEMPLATE,
+        title="Privacy Policy",
+        effective_date=_EFFECTIVE_DATE,
+        body=_PRIVACY_BODY,
+    )
+
+
+@app.get("/terms")
+def terms():
+    return render_template_string(
+        _LEGAL_PAGE_TEMPLATE,
+        title="SMS Terms & Conditions",
+        effective_date=_EFFECTIVE_DATE,
+        body=_TERMS_BODY,
+    )
+
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}

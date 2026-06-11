@@ -137,6 +137,20 @@ def test_parsed_session_validation_filters_bad_durations():
     assert parsing._is_valid(ParsedSession(title="X", date="2026-06-11", minutes=1))
 
 
+def test_privacy_and_terms_are_public_with_required_disclosures(client):
+    privacy = client.get("/privacy")
+    assert privacy.status_code == 200
+    assert b"Message and data rates may apply" in privacy.data
+    assert b"third parties" in privacy.data  # non-sharing statement
+    assert b"Message frequency" in privacy.data or b"frequency varies" in privacy.data
+
+    terms = client.get("/terms")
+    assert terms.status_code == 200
+    assert b"Message and data rates may apply" in terms.data
+    assert b"STOP" in terms.data
+    assert b"HELP" in terms.data
+
+
 def test_twilio_signature_validation(client, monkeypatch):
     import base64
     import hashlib
