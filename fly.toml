@@ -1,0 +1,26 @@
+# Fly.io config. Replace the app name, then: fly launch --no-deploy && fly deploy
+app = "readathon-log"
+primary_region = "ewr"
+
+[build]
+
+[env]
+  DB_PATH = "/data/readathon.db"
+  CONTACTS_PATH = "/data/contacts.json"
+  TWILIO_VALIDATE = "true"
+
+[[mounts]]
+  source = "readathon_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # Keep the machine always on so the Twilio webhook is never missed.
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
