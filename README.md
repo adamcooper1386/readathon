@@ -91,81 +91,122 @@ every message, so you can edit it without restarting:
    app runs behind a proxy/load balancer, also set `PUBLIC_BASE_URL`.
 4. Text the number from a mapped phone and check you get a confirmation back.
 
-## Deployment
+## Production deployment — readathonlog.com
 
-### Option A — Fly.io (recommended, ~$2–3/month)
+Production runs on the existing DigitalOcean droplets behind the load
+balancer, deployed by `.github/workflows/deploy.yml` on every push to `main`
+(same pattern as the dicey project).
 
-The included `Dockerfile` and `fly.toml` keep one small machine always on with
-SQLite on a persistent volume.
+### Architecture: one primary droplet owns the database
 
-```sh
-fly launch --no-deploy            # accept the existing fly.toml; pick your app name
-fly volumes create readathon_data --size 1
-fly secrets set ANTHROPIC_API_KEY=sk-ant-... \
-                APP_SECRET_TOKEN=$(openssl rand -hex 24) \
-                TWILIO_AUTH_TOKEN=... \
-                CHILD_NAME=Tommy TIMEZONE=America/New_York \
-                PUBLIC_BASE_URL=https://YOUR-APP.fly.dev
-fly deploy
-```
-
-Then upload the contacts file to the volume:
-
-```sh
-fly ssh console -C "sh -c 'cat > /data/contacts.json'" < contacts.json
-```
-
-Fly serves HTTPS automatically; point the Twilio webhook at
-`https://YOUR-APP.fly.dev/sms`.
-
-### Option B — small VPS (systemd + Caddy)
-
-```sh
-# as a deploy user on the server
-git clone <this repo> /opt/readathon && cd /opt/readathon
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-cp .env.example .env && nano .env       # fill in secrets; set TWILIO_VALIDATE=true
-cp contacts.json.example contacts.json && nano contacts.json
-```
-
-`/etc/systemd/system/readathon.service`:
-
-```ini
-[Unit]
-Description=Readathon reading log
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/readathon
-ExecStart=/opt/readathon/.venv/bin/gunicorn --bind 127.0.0.1:8000 --workers 2 app:app
-Restart=always
-User=www-data
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```sh
-systemctl enable --now readathon
-```
-
-Caddy gives you automatic HTTPS — `/etc/caddy/Caddyfile`:
+The app uses a single SQLite file, which cannot be shared across droplets.
+So while the **code deploys to every droplet** (warm standby), the nginx site
+for `readathonlog.com` on **every** droplet proxies to one designated
+**primary** droplet's VPC private IP on port 3040:
 
 ```
-readathon.example.com {
-    reverse_proxy 127.0.0.1:8000
-}
+Twilio → LB (TLS) → any droplet :80 (nginx) → primary droplet :3040 (gunicorn + SQLite)
 ```
 
-Point the Twilio webhook at `https://readathon.example.com/sms` and set
-`PUBLIC_BASE_URL=https://readathon.example.com` in `.env`.
+The load balancer can route a request to any droplet and it still lands on
+the same database. UFW restricts port 3040 to the VPC (`10.0.0.0/8`).
+Failover: edit the `readathon_primary` upstream IP in
+`/etc/nginx/sites-available/readathonlog.com` on each droplet and
+`systemctl reload nginx`. The new primary starts with an empty DB unless you
+copy `/var/lib/readathon/readathon.db` over.
+
+On each droplet (provisioned by `cloud-init.yaml`):
+
+| Thing | Where |
+|---|---|
+| App checkout | `/home/adam/readathon` (deployed by the workflow) |
+| Virtualenv | `/home/adam/readathon/.venv` |
+| Env file | `/home/adam/readathon/.env` (written from the `READATHON_PROD_ENV` secret) |
+| Contacts | `/home/adam/readathon/contacts.json` (written from `READATHON_CONTACTS_JSON` if set) |
+| SQLite DB | `/var/lib/readathon/readathon.db` (outside the checkout, survives redeploys) |
+| Service | `readathon.service` → gunicorn on `0.0.0.0:3040` |
+| nginx site | `readathonlog.com` → `http://<primary-private-ip>:3040` |
+
+### One-time setup (manual steps)
+
+1. **GitHub deploy key** — add the public half of the readathon deploy key
+   (in `cloud-init.yaml`, comment `readathon-deploy-key`) to this GitHub
+   repo under *Settings → Deploy keys* (read-only):
+
+   ```
+   ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIACfk+XLx0TjzzlGkVsqYUAISWwb3mPQ0bxVwV2JoMId readathon-deploy-key
+   ```
+
+2. **GitHub repo variables** (Settings → Secrets and variables → Actions →
+   Variables): `DEPLOY_HOSTS` (droplet IPs, JSON array or whitespace
+   separated), `DEPLOY_USER` (`adam`), optionally `DEPLOY_PORT`.
+
+3. **GitHub repo secrets**:
+   - `DEPLOY_SSH_KEY` — the existing github-actions deploy SSH private key
+     (same one dicey uses; its public half is in cloud-init's
+     `ssh_authorized_keys`).
+   - `READATHON_PROD_ENV` — the full production env file:
+
+     ```
+     ANTHROPIC_API_KEY=sk-ant-...
+     APP_SECRET_TOKEN=<openssl rand -hex 24>
+     CHILD_NAME=Tommy
+     TIMEZONE=America/New_York
+     AI_MODEL=claude-haiku-4-5
+     TWILIO_VALIDATE=true
+     TWILIO_AUTH_TOKEN=<from Twilio console>
+     PUBLIC_BASE_URL=https://readathonlog.com
+     DB_PATH=/var/lib/readathon/readathon.db
+     CONTACTS_PATH=/home/adam/readathon/contacts.json
+     ```
+
+   - `READATHON_CONTACTS_JSON` (optional) — the contacts map, e.g.
+     `{"+15551234567": "Mom"}`. When set, the workflow rewrites
+     `contacts.json` on every deploy (the secret is the source of truth);
+     when unset, edit the file on the droplets by hand.
+
+4. **Set the primary droplet's private IP** in the `readathon_primary`
+   upstream in `cloud-init.yaml` (placeholder `10.124.0.2`) so future
+   droplets get the right value, and in
+   `/etc/nginx/sites-available/readathonlog.com` on existing droplets.
+
+5. **Existing droplets** were provisioned before this config existed, so
+   apply the new pieces once per droplet (new droplets get all of this from
+   cloud-init automatically):
+
+   ```sh
+   sudo apt-get install -y python3-venv python3-pip
+   sudo install -d -m 755 -o adam -g adam /home/adam/readathon /var/lib/readathon
+   # copy from cloud-init.yaml: the readathon deploy key, nginx site, systemd unit
+   sudo ufw allow from 10.0.0.0/8 to any port 3040 proto tcp
+   sudo ln -sf /etc/nginx/sites-available/readathonlog.com /etc/nginx/sites-enabled/readathonlog.com
+   sudo nginx -t && sudo systemctl reload nginx
+   sudo systemctl daemon-reload && sudo systemctl enable readathon
+   ```
+
+   Also append `/bin/systemctl restart readathon` and
+   `/bin/systemctl status readathon` to `/etc/sudoers.d/deploy-restarts`.
+
+6. **DNS + load balancer** — point `readathonlog.com` (and `www`) at the
+   load balancer; add a forwarding rule HTTPS 443 (with the LB-managed
+   certificate for readathonlog.com) → HTTP 80 on the droplets. The LB
+   health check stays on `/` port 80 (served by the nginx `healthcheck`
+   site).
+
+7. **Twilio** — set the number's inbound webhook to
+   `https://readathonlog.com/sms` (HTTP POST).
+
+8. **Deploy** — push to `main` (or run the workflow manually). Then send a
+   test text and check `https://readathonlog.com/dashboard?token=...`.
 
 ### Backups
 
-Everything lives in one SQLite file. Copy it periodically:
+Everything lives in one SQLite file on the primary droplet. Copy it
+periodically:
 
 ```sh
-sqlite3 data/readathon.db ".backup backup.db"
+ssh adam@PRIMARY "sqlite3 /var/lib/readathon/readathon.db '.backup /tmp/readathon-backup.db'"
+scp adam@PRIMARY:/tmp/readathon-backup.db ./backups/
 ```
 
 ## Correcting a mistyped session
@@ -173,7 +214,8 @@ sqlite3 data/readathon.db ".backup backup.db"
 The dashboard is read-only by design. Fix mistakes directly on the server:
 
 ```sh
-sqlite3 data/readathon.db
+ssh adam@PRIMARY
+sqlite3 /var/lib/readathon/readathon.db
 sqlite> SELECT id, session_date, title, minutes, reader FROM sessions ORDER BY id DESC LIMIT 5;
 sqlite> UPDATE sessions SET minutes = 25 WHERE id = 42;
 sqlite> DELETE FROM sessions WHERE id = 43;
@@ -184,4 +226,4 @@ sqlite> DELETE FROM sessions WHERE id = 43;
 - Twilio number ≈ $1.15/month plus ~$0.0079 per SMS each way.
 - Claude Haiku parsing: a typical message costs a fraction of a cent; a whole
   summer of daily texts is well under $1.
-- Hosting: ~$2–5/month on Fly.io or any small VPS.
+- Hosting: rides on the existing droplets + load balancer, so no extra cost.

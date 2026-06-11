@@ -1,0 +1,212 @@
+name: Deploy Readathon
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: readathon-production
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Run tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out deploy revision
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies and test
+        run: |
+          set -euo pipefail
+          pip install -r requirements.txt pytest
+          pytest -q
+
+  prepare-hosts:
+    name: Prepare host matrix
+    runs-on: ubuntu-latest
+    outputs:
+      hosts: ${{ steps.hosts.outputs.hosts }}
+    env:
+      DEPLOY_HOSTS: ${{ vars.DEPLOY_HOSTS }}
+    steps:
+      - name: Build host matrix
+        id: hosts
+        shell: python
+        run: |
+          import json
+          import os
+          import re
+          import sys
+
+          raw = os.environ.get("DEPLOY_HOSTS", "")
+          if not raw.strip():
+              sys.stderr.write("Missing DEPLOY_HOSTS repository variable\n")
+              sys.exit(1)
+
+          try:
+              parsed = json.loads(raw)
+          except json.JSONDecodeError:
+              hosts = re.split(r"[\s,]+", raw.strip())
+          else:
+              if not isinstance(parsed, list):
+                  sys.stderr.write("DEPLOY_HOSTS JSON must be an array of strings\n")
+                  sys.exit(1)
+              hosts = parsed
+
+          deduped = []
+          seen = set()
+          for host in hosts:
+              host = str(host).strip()
+              if host and host not in seen:
+                  deduped.append(host)
+                  seen.add(host)
+
+          if not deduped:
+              sys.stderr.write("DEPLOY_HOSTS did not contain any hosts.\n")
+              sys.exit(1)
+
+          hosts_json = json.dumps(deduped, separators=(",", ":"))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"hosts={hosts_json}\n")
+          print(f"Deploying to {len(deduped)} host(s).")
+
+  deploy:
+    name: Deploy to ${{ matrix.host }}
+    needs:
+      - test
+      - prepare-hosts
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        host: ${{ fromJson(needs.prepare-hosts.outputs.hosts) }}
+    env:
+      DEPLOY_HOST: ${{ matrix.host }}
+      DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+      REMOTE_DIR: /home/adam/readathon
+      READATHON_DEPLOY_KEY_PATH: /home/adam/.ssh/readathon_deploy_key
+      REPO_SSH_URL: git@github.com:adamcooper1386/readathon.git
+
+    steps:
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_HOST:?Missing host from DEPLOY_HOSTS matrix}"
+          : "${DEPLOY_USER:?Missing DEPLOY_USER repository variable}"
+          : "${DEPLOY_SSH_KEY:?Missing DEPLOY_SSH_KEY secret}"
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keygen -y -f ~/.ssh/deploy_key > ~/.ssh/deploy_key.pub
+          printf 'DEPLOY_SSH_KEY public fingerprint: '
+          ssh-keygen -lf ~/.ssh/deploy_key.pub
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Clone or pull latest main
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REMOTE_DIR='$REMOTE_DIR' REPO_SSH_URL='$REPO_SSH_URL' READATHON_DEPLOY_KEY_PATH='$READATHON_DEPLOY_KEY_PATH' bash -s" <<'REMOTE'
+          set -euo pipefail
+          export GIT_SSH_COMMAND="ssh -i $READATHON_DEPLOY_KEY_PATH -o IdentitiesOnly=yes"
+
+          if [ -d "$REMOTE_DIR/.git" ]; then
+            cd "$REMOTE_DIR"
+            git remote set-url origin "$REPO_SSH_URL"
+            git fetch origin main
+            git checkout main
+            git pull --ff-only origin main
+          elif [ ! -e "$REMOTE_DIR" ] || [ -z "$(find "$REMOTE_DIR" -mindepth 1 -maxdepth 1 2>/dev/null)" ]; then
+            install -d -m 755 "$(dirname "$REMOTE_DIR")"
+            rmdir "$REMOTE_DIR" 2>/dev/null || true
+            git clone --branch main "$REPO_SSH_URL" "$REMOTE_DIR"
+            cd "$REMOTE_DIR"
+          else
+            printf '%s exists but is not a git checkout and is not empty.\n' "$REMOTE_DIR" >&2
+            exit 1
+          fi
+
+          printf 'pulled_sha=%s\n' "$(git rev-parse HEAD)"
+          REMOTE
+
+      - name: Write production secrets
+        env:
+          READATHON_PROD_ENV: ${{ secrets.READATHON_PROD_ENV }}
+          READATHON_CONTACTS_JSON: ${{ secrets.READATHON_CONTACTS_JSON }}
+        run: |
+          set -euo pipefail
+          : "${READATHON_PROD_ENV:?Missing READATHON_PROD_ENV secret}"
+
+          tmp_dir="$(mktemp -d)"
+          trap 'rm -rf "$tmp_dir"' EXIT
+
+          printf '%s\n' "$READATHON_PROD_ENV" > "$tmp_dir/readathon.env"
+          files=("$tmp_dir/readathon.env")
+          if [ -n "${READATHON_CONTACTS_JSON:-}" ]; then
+            printf '%s\n' "$READATHON_CONTACTS_JSON" > "$tmp_dir/contacts.json"
+            files+=("$tmp_dir/contacts.json")
+          fi
+
+          scp -i ~/.ssh/deploy_key -P "$DEPLOY_PORT" \
+            "${files[@]}" \
+            "$DEPLOY_USER@$DEPLOY_HOST:/tmp/"
+
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REMOTE_DIR='$REMOTE_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+          install -d -m 755 "$REMOTE_DIR"
+          install -m 600 /tmp/readathon.env "$REMOTE_DIR/.env"
+          if [ -f /tmp/contacts.json ]; then
+            install -m 600 /tmp/contacts.json "$REMOTE_DIR/contacts.json"
+          fi
+          rm -f /tmp/readathon.env /tmp/contacts.json
+          REMOTE
+
+      - name: Build, restart, and verify
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" \
+            "REMOTE_DIR='$REMOTE_DIR' bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd "$REMOTE_DIR"
+
+          if [ ! -d .venv ]; then
+            python3 -m venv .venv
+          fi
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet -r requirements.txt
+
+          sudo /bin/systemctl daemon-reload
+          sudo /bin/systemctl restart readathon
+          sudo /bin/systemctl status --no-pager readathon
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --output /dev/null http://127.0.0.1:3040/healthz; then
+              break
+            fi
+
+            if [ "$attempt" -eq 30 ]; then
+              sudo /bin/systemctl status --no-pager readathon
+              sudo journalctl -u readathon -n 100 --no-pager
+              curl --fail --show-error http://127.0.0.1:3040/healthz >/dev/null
+            fi
+
+            sleep 1
+          done
+          printf 'deployed_sha=%s\n' "$(git rev-parse HEAD)"
+          REMOTE
