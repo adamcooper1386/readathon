@@ -2,6 +2,9 @@
 contacts.json
 # Hardlinked from ~/git/do-deployment; contains private deploy keys — never commit
 cloud-init.yaml
+# GitHub Actions -> droplet SSH key (private half is the DEPLOY_SSH_KEY secret)
+readathon_actions_deploy
+readathon_actions_deploy.pub
 data/
 *.db
 __pycache__/
