@@ -1,5 +1,7 @@
 .env
 contacts.json
+# Hardlinked from ~/git/do-deployment; contains private deploy keys — never commit
+cloud-init.yaml
 data/
 *.db
 __pycache__/
