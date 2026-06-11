@@ -72,11 +72,45 @@ def _valid_twilio_signature(req) -> bool:
 
 
 def _require_token():
-    token = request.args.get("token", "")
+    token = request.args.get("token", "") or request.form.get("token", "")
     if not config.APP_SECRET_TOKEN or not hmac.compare_digest(
         token, config.APP_SECRET_TOKEN
     ):
         abort(403)
+
+
+def _store_sessions(sessions, sender: str, body: str, fallback_reader=None) -> str:
+    """Store parsed sessions and return the confirmation text.
+
+    Reader precedence: named in the message > fallback_reader (web form
+    selection) > sender's contacts-map entry > "Unknown".
+    """
+    received_at = datetime.now(ZoneInfo(config.TIMEZONE)).isoformat(timespec="seconds")
+    lines = []
+    for s in sessions:
+        if s.reader and s.reader.strip():
+            reader = s.reader.strip()
+        elif fallback_reader:
+            reader = fallback_reader
+        else:
+            reader = contacts.resolve_reader(None, sender)
+        db.insert_session(
+            session_date=s.date,
+            title=s.title,
+            minutes=s.minutes,
+            reader=reader,
+            sender=sender,
+            raw_message=body,
+            received_at=received_at,
+        )
+        lines.append(f"{s.title} — {s.minutes} min with {reader} on {s.date}")
+
+    total = db.total_minutes()
+    return (
+        "Logged: "
+        + "; ".join(lines)
+        + f". Summer total: {total} min ({_format_duration(total)})."
+    )
 
 
 # ---------------------------------------------------------------- SMS intake
@@ -102,28 +136,7 @@ def sms():
     if not sessions:
         return _twiml(REPHRASE_HINT)
 
-    received_at = datetime.now(ZoneInfo(config.TIMEZONE)).isoformat(timespec="seconds")
-    lines = []
-    for s in sessions:
-        reader = contacts.resolve_reader(s.reader, sender)
-        db.insert_session(
-            session_date=s.date,
-            title=s.title,
-            minutes=s.minutes,
-            reader=reader,
-            sender=sender,
-            raw_message=body,
-            received_at=received_at,
-        )
-        lines.append(f"{s.title} — {s.minutes} min with {reader} on {s.date}")
-
-    total = db.total_minutes()
-    reply = (
-        "Logged: "
-        + "; ".join(lines)
-        + f". Summer total: {total} min ({_format_duration(total)})."
-    )
-    return _twiml(reply)
+    return _twiml(_store_sessions(sessions, sender, body))
 
 
 # ---------------------------------------------------------------- dashboard
@@ -151,6 +164,8 @@ _DASHBOARD_TEMPLATE = """<!doctype html>
 <p class="totals">
   <strong>{{ total }} minutes</strong> ({{ total_pretty }}) across
   <strong>{{ count }}</strong> session{{ '' if count == 1 else 's' }}.
+  &nbsp;·&nbsp; <a href="/log?token={{ token }}">Log reading</a>
+  &nbsp;·&nbsp; <a href="/export.csv?token={{ token }}">Download CSV</a>
 </p>
 <table>
 <thead><tr><th>Date</th><th>Title</th><th>Minutes</th><th>Reader</th><th>Logged at</th></tr></thead>
@@ -181,6 +196,7 @@ def dashboard():
         total=total,
         total_pretty=_format_duration(total),
         count=db.session_count(),
+        token=request.args.get("token", ""),
     )
 
 
@@ -195,6 +211,97 @@ def export_csv():
         mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=reading-log.csv"},
     )
+
+
+# ---------------------------------------------------------------- web logging
+
+
+_LOG_TEMPLATE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Log Reading — {{ child_name }}</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem auto; max-width: 36rem; padding: 0 1rem; color: #222; }
+  h1 { font-size: 1.5rem; }
+  label { display: block; margin: 1rem 0 0.25rem; font-weight: 600; }
+  select, textarea { width: 100%; padding: 0.5rem; font: inherit; border: 1px solid #bbb; border-radius: 6px; box-sizing: border-box; }
+  textarea { min-height: 6rem; }
+  button { margin-top: 1rem; padding: 0.6rem 1.5rem; font: inherit; font-weight: 600; color: #fff; background: #2563eb; border: 0; border-radius: 6px; cursor: pointer; }
+  .result { margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 6px; }
+  .result.ok { background: #ecfdf5; border: 1px solid #6ee7b7; }
+  .result.warn { background: #fffbeb; border: 1px solid #fcd34d; }
+  .hint { color: #666; font-size: 0.9rem; margin-top: 0.25rem; }
+  nav { margin-top: 2rem; font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<h1>Log {{ child_name }}'s Reading</h1>
+{% if result %}<div class="result {{ result_kind }}">{{ result }}</div>{% endif %}
+<form method="post" action="/log">
+  <input type="hidden" name="token" value="{{ token }}">
+  <label for="reader">Who are you?</label>
+  <select id="reader" name="reader" required>
+    {% for name in names %}
+    <option value="{{ name }}" {% if name == selected %}selected{% endif %}>{{ name }}</option>
+    {% endfor %}
+  </select>
+  <label for="message">What did you read?</label>
+  <textarea id="message" name="message" required
+    placeholder="e.g. last night before bed we read Trudy Ran Away for 15 minutes"></textarea>
+  <p class="hint">Write it like a text message — books, minutes, and when
+  ("yesterday", "last night", "Tuesday") are all understood. Naming someone
+  else ("with Grandma") logs them as the reader instead of you.</p>
+  <button type="submit">Log it</button>
+</form>
+<nav><a href="/dashboard?token={{ token }}">View the dashboard</a></nav>
+</body>
+</html>"""
+
+
+def _render_log_page(result=None, result_kind="ok", selected=None):
+    names = contacts.reader_names() or [contacts.UNKNOWN_READER]
+    return render_template_string(
+        _LOG_TEMPLATE,
+        child_name=config.CHILD_NAME,
+        names=names,
+        selected=selected,
+        token=request.args.get("token", "") or request.form.get("token", ""),
+        result=result,
+        result_kind=result_kind,
+    )
+
+
+@app.get("/log")
+def log_form():
+    _require_token()
+    return _render_log_page()
+
+
+@app.post("/log")
+def log_submit():
+    _require_token()
+    reader = request.form.get("reader", "").strip()
+    body = request.form.get("message", "").strip()
+    if not body:
+        return _render_log_page("Please enter what was read.", "warn", reader)
+
+    try:
+        sessions = parsing.parse_message(body)
+    except Exception:
+        logger.exception("parse failed for web log from %s", reader)
+        return _render_log_page(ERROR_REPLY, "warn", reader)
+
+    if not sessions:
+        return _render_log_page(REPHRASE_HINT, "warn", reader)
+
+    # Attribute the entry to the selected contact's phone number so web logs
+    # and texted logs are audited the same way.
+    sender = contacts.phone_for(reader) or "web"
+    confirmation = _store_sessions(sessions, sender, body, fallback_reader=reader)
+    return _render_log_page(confirmation, "ok", reader)
 
 
 # ------------------------------------------- SMS campaign compliance pages

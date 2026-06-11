@@ -19,6 +19,9 @@ SMS → Twilio → POST /sms → Claude (structured parse) → SQLite
   signature validation.
 - **`GET /dashboard?token=...`** — read-only table of all sessions, most recent
   first, with the summer total and session count.
+- **`GET /log?token=...`** — web form that replicates sending a text: pick who
+  you are from the contacts list, type the message, and it runs through the
+  same parser and confirmation flow as SMS.
 - **`GET /export.csv?token=...`** — CSV of every session (date, title, minutes,
   reader, logged-at) ending with a total row. Opens cleanly in Excel/Sheets.
 - **`python export_csv.py [file]`** — same CSV from the server command line.

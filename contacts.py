@@ -34,3 +34,16 @@ def resolve_reader(named_reader: Optional[str], sender: str) -> str:
     if named_reader and named_reader.strip():
         return named_reader.strip()
     return load_contacts().get(sender, UNKNOWN_READER)
+
+
+def reader_names() -> list:
+    """Distinct reader names from the contacts file, sorted."""
+    return sorted(set(load_contacts().values()))
+
+
+def phone_for(name: str) -> Optional[str]:
+    """First phone number mapped to this reader name, if any."""
+    for phone, reader in load_contacts().items():
+        if reader == name:
+            return phone
+    return None

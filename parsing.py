@@ -1,7 +1,7 @@
 """AI-powered parsing of free-form reading-log texts into structured sessions."""
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import List, Optional
 from zoneinfo import ZoneInfo
 
@@ -46,7 +46,15 @@ names one (e.g. "with Grandma" -> "Grandma"). Otherwise null. The child being re
 not the reader.
 
 If the message contains no reading information at all (greetings, chit-chat, questions), \
-return an empty sessions array."""
+return an empty sessions array.
+
+Examples (with today being {today}):
+- "25 min of Dog Man with Grandma today" -> [{{"title": "Dog Man", "date": "{today}", "minutes": 25, "reader": "Grandma"}}]
+- "last night before bed we read Trudy Ran Away for 15 minutes" -> [{{"title": "Trudy Ran Away", "date": "{yesterday}", "minutes": 15, "reader": null}}] (last night = yesterday evening)
+- "read 3:15 to 3:45 with grandma, Charlotte's Web" -> [{{"title": "Charlotte's Web", "date": "{today}", "minutes": 30, "reader": "Grandma"}}]
+- "He read to me for half an hour yesterday" -> [{{"title": "Unspecified", "date": "{yesterday}", "minutes": 30, "reader": null}}]
+- "Dog Man 20 min and Frog and Toad 15 min before bed" -> two sessions of 20 and 15 minutes dated {today} ("before bed" alone, without "last night", means today)
+- "thanks, see you tomorrow" -> []"""
 
 
 def _client() -> anthropic.Anthropic:
@@ -63,6 +71,7 @@ def parse_message(body: str) -> List[ParsedSession]:
     system = _SYSTEM_PROMPT.format(
         weekday=now.strftime("%A"),
         today=now.date().isoformat(),
+        yesterday=(now.date() - timedelta(days=1)).isoformat(),
         timezone=config.TIMEZONE,
     )
 

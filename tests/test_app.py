@@ -137,6 +137,66 @@ def test_parsed_session_validation_filters_bad_durations():
     assert parsing._is_valid(ParsedSession(title="X", date="2026-06-11", minutes=1))
 
 
+def test_log_page_requires_token_and_lists_contacts(client):
+    assert client.get("/log").status_code == 403
+    resp = client.get("/log?token=test-token")
+    assert resp.status_code == 200
+    assert b"Mom" in resp.data  # from the test contacts map
+
+
+def test_web_log_stores_with_selected_reader(client, monkeypatch):
+    _mock_parse(
+        monkeypatch,
+        [ParsedSession(title="Trudy Ran Away", date="2026-06-10", minutes=15)],
+    )
+    resp = client.post(
+        "/log",
+        data={
+            "token": "test-token",
+            "reader": "Mom",
+            "message": "last night before bed we read Trudy Ran Away for 15 minutes",
+        },
+    )
+    assert resp.status_code == 200
+    assert b"Logged:" in resp.data
+    row = db.all_sessions()[0]
+    assert row["reader"] == "Mom"
+    assert row["session_date"] == "2026-06-10"  # yesterday, not today
+    assert row["sender"] == "+15550001111"  # attributed to Mom's phone
+
+
+def test_web_log_named_reader_overrides_selection(client, monkeypatch):
+    _mock_parse(
+        monkeypatch,
+        [ParsedSession(title="Dog Man", date="2026-06-11", minutes=20, reader="Grandma")],
+    )
+    client.post(
+        "/log",
+        data={"token": "test-token", "reader": "Mom", "message": "Dog Man 20 min with Grandma"},
+    )
+    assert db.all_sessions()[0]["reader"] == "Grandma"
+
+
+def test_web_log_rejects_bad_token_and_empty_message(client, monkeypatch):
+    resp = client.post("/log", data={"token": "wrong", "reader": "Mom", "message": "x"})
+    assert resp.status_code == 403
+
+    _mock_parse(monkeypatch, [])
+    resp = client.post("/log", data={"token": "test-token", "reader": "Mom", "message": ""})
+    assert b"Please enter" in resp.data
+    assert db.session_count() == 0
+
+
+def test_web_log_non_reading_message_stores_nothing(client, monkeypatch):
+    _mock_parse(monkeypatch, [])
+    resp = client.post(
+        "/log",
+        data={"token": "test-token", "reader": "Mom", "message": "hello there"},
+    )
+    assert b"find a reading session" in resp.data
+    assert db.session_count() == 0
+
+
 def test_privacy_and_terms_are_public_with_required_disclosures(client):
     privacy = client.get("/privacy")
     assert privacy.status_code == 200
