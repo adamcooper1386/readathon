@@ -1,7 +1,9 @@
 .env
 contacts.json
-# Hardlinked from ~/git/do-deployment; contains private deploy keys — never commit
+# Local convenience symlinks to ~/git/do-deploy — never tracked
+# (cloud-init.yaml contains SSH deploy keys; infra/ holds symlinks to it and the shared README)
 cloud-init.yaml
+infra/
 # GitHub Actions -> droplet SSH key (private half is the DEPLOY_SSH_KEY secret)
 readathon_actions_deploy
 readathon_actions_deploy.pub
